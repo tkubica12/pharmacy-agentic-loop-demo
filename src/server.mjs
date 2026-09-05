@@ -37,8 +37,12 @@ export function buildServer() {
         json(response, 400, { error: "invalid export name" });
         return;
       }
+      if (filename !== "stock.json") {
+        json(response, 404, { error: "export not found" });
+        return;
+      }
       try {
-        const content = readFileSync(join(dataDirectory, filename), "utf8");
+        const content = readFileSync(join(dataDirectory, "stock.json"), "utf8");
         response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
         response.end(content);
       } catch (error) {

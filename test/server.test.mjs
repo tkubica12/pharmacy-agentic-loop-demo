@@ -26,6 +26,18 @@ test("serves the synthetic health and seed snapshot", () => withServer(async (ur
   assert.equal(snapshot.items.length, 4);
 }));
 
+test("rejects unknown export names", () => withServer(async (url) => {
+  const response = await fetch(`${url}/exports/unknown.json`);
+  assert.equal(response.status, 404);
+  assert.deepEqual(await response.json(), { error: "export not found" });
+}));
+
+test("rejects encoded traversal export names", () => withServer(async (url) => {
+  const response = await fetch(`${url}/exports/%2e%2e%2fpackage.json`);
+  assert.equal(response.status, 404);
+  assert.deepEqual(await response.json(), { error: "export not found" });
+}));
+
 test("a suggestion changes no stock and explicit reservation decrements stock", () => withServer(async (url) => {
   const before = await (await fetch(`${url}/stock`)).json();
   const conflict = await fetch(`${url}/reservations`, {
