@@ -32,7 +32,7 @@ export function buildServer() {
     if (request.method === "GET" && request.url.startsWith("/exports/")) {
       let filename;
       try {
-        filename = decodeURIComponent(request.url.slice("/exports/".length));
+        filename = decodeURIComponent(request.url.slice(9)); // "/exports/" prefix
       } catch {
         json(response, 400, { error: "invalid export name" });
         return;
