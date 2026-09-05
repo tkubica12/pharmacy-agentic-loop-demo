@@ -11,6 +11,10 @@ on:
         description: Pull request that produced the remediation commit
         required: true
         type: number
+      run_id:
+        description: Workshop run identifier from the repository ownership topic
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -46,6 +50,7 @@ jobs:
           RELEASE_SHA: ${{ inputs.release_sha }}
           PR_NUMBER: ${{ inputs.pr_number }}
           WORKFLOW_SHA: ${{ github.sha }}
+          WORKSHOP_RUN_ID: ${{ inputs.run_id }}
         shell: bash
         run: |
           set -euo pipefail
@@ -90,10 +95,13 @@ jobs:
               if (pageItems.length < 100) return items;
             }
           }
-          function latestStates(reviews) {
+          function latestStates(reviews, mergedAt) {
+            if (reviews.some(r => r.state === "DISMISSED")) {
+              throw new Error("Dismissed review history cannot establish the pre-merge approval state.");
+            }
             const states = new Map();
             for (const review of reviews
-              .filter(r => r.user?.type === "User" && r.submitted_at)
+              .filter(r => r.user?.type === "User" && Date.parse(r.submitted_at) <= mergedAt)
               .sort((a, b) => Date.parse(a.submitted_at) - Date.parse(b.submitted_at))) {
               if (["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state)) {
                 states.set(review.user.login.toLowerCase(), review);
@@ -101,15 +109,27 @@ jobs:
             }
             return [...states.values()];
           }
+          function latestPreMergeRun(runs, branch, mergedAt) {
+            const run = runs.filter(r =>
+              r.head_branch === branch && Date.parse(r.created_at) <= mergedAt)
+              .sort((a, b) => b.id - a.id)[0];
+            if (!run || run.status !== "completed" || run.conclusion !== "success" ||
+                !(Date.parse(run.updated_at) <= mergedAt)) {
+              throw new Error("Latest workflow execution did not complete successfully before merge.");
+            }
+            return run;
+          }
           function acceptableCommit(commit, base, head) {
             return commit.sha === head ||
               (commit.parents?.length === 2 &&
                commit.parents[0].sha === base && commit.parents[1].sha === head);
           }
           const metadata = await request("");
+          const workshopRun = process.env.WORKSHOP_RUN_ID;
           if (metadata.private || metadata.default_branch !== "main" ||
               !metadata.topics.includes("workshop-synthetic-pharmacy") ||
-              !metadata.topics.some(t => /^run-pharmacy-loop-[0-9]{8}$/.test(t))) {
+              !/^[a-z0-9][a-z0-9-]{2,38}$/.test(workshopRun ?? "") ||
+              !metadata.topics.includes(`run-${workshopRun}`)) {
             throw new Error("Repository is not the approved public synthetic pharmacy demonstration.");
           }
           const pull = await request(`/pulls/${prNumber}`);
@@ -118,7 +138,7 @@ jobs:
           }
           const mergedAt = Date.parse(pull.merged_at);
           const reviews = await pages(`/pulls/${prNumber}/reviews`);
-          const states = latestStates(reviews);
+          const states = latestStates(reviews, mergedAt);
           const blockers = states.filter(r => ["CHANGES_REQUESTED", "DISMISSED"].includes(r.state));
           const approvals = states.filter(r =>
             r.state === "APPROVED" && r.commit_id === pull.head.sha &&
@@ -130,14 +150,8 @@ jobs:
           const base = commits[0]?.parents?.[0]?.sha;
           if (!base) throw new Error("Cannot establish the pull request base commit.");
           for (const workflow of ["quality.yml", "codeql.yml"]) {
-            const runs = await pages(`/actions/workflows/${workflow}/runs?event=pull_request&status=completed`);
-            const candidates = runs.filter(run =>
-              run.head_branch === pull.head.ref && Date.parse(run.updated_at) <= mergedAt)
-              .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at) || b.id - a.id);
-            const run = candidates[0];
-            if (!run || run.conclusion !== "success") {
-              throw new Error(`Latest pre-merge ${workflow} run is absent or unsuccessful.`);
-            }
+            const runs = await pages(`/actions/workflows/${workflow}/runs?event=pull_request`);
+            const run = latestPreMergeRun(runs, pull.head.ref, mergedAt);
             const commit = await request(`/commits/${run.head_sha}`);
             if (!acceptableCommit(commit, base, pull.head.sha)) {
               throw new Error(`${workflow} did not test the PR head or its exact base+head test merge.`);
